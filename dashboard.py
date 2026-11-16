@@ -33,11 +33,45 @@ def load_data():
     return df[df["order_date"].dt.year == 2017].reset_index(drop=True)
 
 
-all_df = load_data()
+full_df = load_data()
 
-if all_df.empty:
+if full_df.empty:
     st.error("Data transaksi tahun 2017 tidak ditemukan.")
     st.stop()
+
+# =========================================================
+# FILTER INTERAKTIF (sidebar): semua angka, grafik, dan insight mengikuti filter ini
+# =========================================================
+MIN_D = pd.Timestamp("2017-01-01").date()
+MAX_D = pd.Timestamp("2017-12-31").date()
+
+
+def fmt_tgl(d):
+    return f"{d.day} {BULAN[d.month - 1]} {d.year}"
+
+
+st.sidebar.header("🔎 Filter Data")
+date_range = st.sidebar.date_input(
+    "Rentang tanggal order (2017)",
+    value=(MIN_D, MAX_D), min_value=MIN_D, max_value=MAX_D, format="DD/MM/YYYY",
+)
+if not isinstance(date_range, (tuple, list)) or len(date_range) != 2:
+    st.sidebar.info("Pilih tanggal akhir untuk melengkapi rentang.")
+    st.info("Pilih **tanggal awal dan tanggal akhir** di sidebar untuk menampilkan dashboard.")
+    st.stop()
+
+start_date, end_date = date_range
+all_df = full_df[
+    (full_df["order_date"].dt.date >= start_date) & (full_df["order_date"].dt.date <= end_date)
+].reset_index(drop=True)
+period_label = fmt_tgl(start_date) if start_date == end_date else f"{fmt_tgl(start_date)} – {fmt_tgl(end_date)}"
+st.sidebar.caption(f"Periode: {period_label}")
+
+if all_df.empty:
+    st.sidebar.warning("Tidak ada data pada rentang ini.")
+    st.warning(f"Tidak ada transaksi pada periode **{period_label}**. Ubah rentang tanggal di sidebar.")
+    st.stop()
+st.sidebar.caption(f"{all_df['order_id'].nunique():,} order pada periode ini")
 
 
 # =========================================================
@@ -69,9 +103,16 @@ category_df = (
     .reset_index(drop=True)
 )
 
+if category_df.empty:
+    st.warning(f"Tidak ada produk berkategori pada periode **{period_label}**. Perluas rentang tanggal.")
+    st.stop()
+
 top5_df = category_df.head(5)
 bottom5_df = category_df.tail(5)
 top5_contribution = top5_df["revenue_pct"].sum()
+top5_names = ", ".join(top5_df["category"])
+best_vol = top5_df.loc[top5_df["order_count"].idxmax()]
+best_val = top5_df.loc[top5_df["revenue_per_order"].idxmax()]
 highest_category = category_df.iloc[0]
 lowest_category = category_df.iloc[-1]
 
@@ -79,22 +120,27 @@ lowest_category = category_df.iloc[-1]
 monthly_df = (
     all_df.groupby(all_df["order_date"].dt.month)
     .agg(order_count=("order_id", "nunique"), revenue=("revenue", "sum"))
-    .reindex(range(1, 13), fill_value=0)
+    .reindex(range(start_date.month, end_date.month + 1), fill_value=0)
     .reset_index()
     .rename(columns={"order_date": "month"})
 )
 monthly_df["month_label"] = monthly_df["month"].map(lambda m: BULAN[m - 1])
 monthly_df["order_mom_pct"] = monthly_df["order_count"].pct_change() * 100
 monthly_df["revenue_mom_pct"] = monthly_df["revenue"].pct_change() * 100
+monthly_df = monthly_df.replace([np.inf, -np.inf], np.nan)
 
 peak_order = monthly_df.loc[monthly_df["order_count"].idxmax()]
 peak_revenue = monthly_df.loc[monthly_df["revenue"].idxmax()]
-peak_idx = int(peak_order["month"]) - 1
+peak_idx = int(monthly_df["order_count"].idxmax())
 prev_order = monthly_df.loc[peak_idx - 1] if peak_idx > 0 else None
-next_order = monthly_df.loc[peak_idx + 1] if peak_idx < 11 else None
+next_order = monthly_df.loc[peak_idx + 1] if peak_idx < len(monthly_df) - 1 else None
+OFFSET_O = (-120, -5) if peak_idx >= len(monthly_df) / 2 else (20, -25)
+peak_rev_idx = int(monthly_df["revenue"].idxmax())
+OFFSET_R = (-120, -5) if peak_rev_idx >= len(monthly_df) / 2 else (20, -25)
 
 # --- RFM ---
-snapshot_date = pd.Timestamp("2018-01-01")
+snapshot_date = pd.Timestamp(end_date) + pd.Timedelta(days=1)
+snapshot_str = fmt_tgl(snapshot_date)
 rfm_df = (
     all_df.groupby("customer_unique_id")
     .agg(
@@ -105,12 +151,13 @@ rfm_df = (
     .reset_index()
 )
 rfm_df["recency"] = (snapshot_date - rfm_df["last_order"]).dt.days
+n_bins = min(5, len(rfm_df))
 rfm_df["R_score"] = pd.qcut(
-    rfm_df["recency"].rank(method="first"), 5, labels=[5, 4, 3, 2, 1]
+    rfm_df["recency"].rank(method="first"), n_bins, labels=list(range(n_bins, 0, -1))
 ).astype(int)
 rfm_df["F_score"] = rfm_df["frequency"].clip(upper=5)
 rfm_df["M_score"] = pd.qcut(
-    rfm_df["monetary"].rank(method="first"), 5, labels=[1, 2, 3, 4, 5]
+    rfm_df["monetary"].rank(method="first"), n_bins, labels=list(range(1, n_bins + 1))
 ).astype(int)
 
 rfm_df["segment"] = np.select(
@@ -159,7 +206,7 @@ st.divider()
 # =========================================================
 # KPI
 # =========================================================
-st.subheader("📊 Ringkasan Data 2017")
+st.subheader(f"📊 Ringkasan Data ({period_label})")
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Total Revenue", f"R$ {total_revenue:,.2f}")
 k2.metric("Total Order", f"{total_orders:,}")
@@ -181,18 +228,18 @@ st.info(
 # --- Top 5 ---
 with st.container(border=True):
     st.subheader("🏆 Top 5 Kategori")
-    st.caption("Persentase dihitung terhadap total revenue seluruh item 2017.")
+    st.caption(f"Persentase dihitung terhadap total revenue seluruh item pada periode {period_label}.")
 
     plot_df = top5_df.iloc[::-1]
     fig, ax = plt.subplots(figsize=(11, 4.8))
     ax.barh(plot_df["category"], plot_df["revenue"] / 1000,
-            color=[MUTED] * 4 + [HIGHLIGHT])
+            color=[MUTED] * (len(plot_df) - 1) + [HIGHLIGHT])
     max_val = plot_df["revenue"].max() / 1000
     for i, (rev, pct) in enumerate(zip(plot_df["revenue"], plot_df["revenue_pct"])):
         ax.text(rev / 1000 + max_val * 0.01, i,
                 f"R$ {rev / 1000:,.0f} ribu ({pct:.1f}%)", va="center", fontsize=10)
     ax.set_xlim(0, max_val * 1.3)
-    ax.set_title("5 Kategori dengan Revenue Tertinggi, 2017", fontsize=14, fontweight="bold")
+    ax.set_title(f"{len(top5_df)} Kategori dengan Revenue Tertinggi ({period_label})", fontsize=14, fontweight="bold")
     ax.set_xlabel("Revenue (R$ ribu)")
     ax.set_ylabel("")
     ax.grid(axis="x", linestyle="--", alpha=0.25)
@@ -213,14 +260,13 @@ with st.container(border=True):
     )
 
 st.success(
-    f"**Insight:** Lima kategori teratas (bed_bath_table, watches_gifts, health_beauty, "
-    f"sports_leisure, computers_accessories) menyumbang sekitar **{top5_contribution:.1f}%** "
-    f"dari total revenue 2017, sedangkan produk tanpa kategori sekitar **{uncategorized_pct:.1f}%**. "
-    f"Kontribusi antar kategori teratas relatif merata. "
-    f"**{highest_category['category']}** unggul di volume "
-    f"({int(highest_category['order_count']):,} order, ± R$ {highest_category['revenue_per_order']:,.0f} per order), "
-    f"sedangkan **watches_gifts** unggul di nilai per order "
-    f"(± R$ {category_df.loc[category_df['category'] == 'watches_gifts', 'revenue_per_order'].iloc[0]:,.0f} per order)."
+    f"**Insight:** {len(top5_df)} kategori teratas ({top5_names}) menyumbang sekitar "
+    f"**{top5_contribution:.1f}%** dari total revenue periode ini, sedangkan produk tanpa kategori "
+    f"sekitar **{uncategorized_pct:.1f}%**. Kontribusi masing-masing berkisar "
+    f"{top5_df['revenue_pct'].min():.1f}%–{top5_df['revenue_pct'].max():.1f}%. "
+    f"**{best_vol['category']}** unggul di volume ({int(best_vol['order_count']):,} order), "
+    f"sedangkan **{best_val['category']}** unggul di nilai per order "
+    f"(± R$ {best_val['revenue_per_order']:,.0f} per order)."
 )
 
 # --- Bottom 5 ---
@@ -230,13 +276,13 @@ with st.container(border=True):
 
     plot_df = bottom5_df.iloc[::-1]
     fig, ax = plt.subplots(figsize=(11, 4.8))
-    ax.barh(plot_df["category"], plot_df["revenue"], color=[WARNING] + [MUTED] * 4)
+    ax.barh(plot_df["category"], plot_df["revenue"], color=[WARNING] + [MUTED] * (len(plot_df) - 1))
     max_val = plot_df["revenue"].max()
     for i, (rev, pct, n) in enumerate(zip(plot_df["revenue"], plot_df["revenue_pct"], plot_df["order_count"])):
         ax.text(rev + max_val * 0.01, i, f"R$ {rev:,.0f} ({pct:.3f}%, {n} order)",
                 va="center", fontsize=10)
     ax.set_xlim(0, max_val * 1.45)
-    ax.set_title("5 Kategori dengan Revenue Terendah, 2017", fontsize=14, fontweight="bold")
+    ax.set_title(f"{len(bottom5_df)} Kategori dengan Revenue Terendah ({period_label})", fontsize=14, fontweight="bold")
     ax.set_xlabel("Revenue (R$)")
     ax.set_ylabel("")
     ax.grid(axis="x", linestyle="--", alpha=0.25)
@@ -248,7 +294,7 @@ with st.container(border=True):
 st.warning(
     f"**Insight:** Kategori terendah adalah **{lowest_category['category']}** dengan revenue "
     f"**R$ {lowest_category['revenue']:,.2f}** dari {int(lowest_category['order_count'])} order. "
-    f"Lima kategori terbawah masing-masing menyumbang kurang dari 0,01% revenue dan hanya "
+    f"Kategori terbawah masing-masing menyumbang paling banyak {bottom5_df['revenue_pct'].max():.3f}% revenue dan hanya "
     f"diwakili {int(bottom5_df['order_count'].min())} sampai {int(bottom5_df['order_count'].max())} order, "
     f"jadi hasilnya perlu dibaca dengan hati-hati."
 )
@@ -277,7 +323,7 @@ with st.container(border=True):
     ax[0].annotate(
         f"Puncak: {int(peak_order['order_count']):,} order",
         xy=(peak_order["month_label"], peak_order["order_count"]),
-        xytext=(-120, -5), textcoords="offset points",
+        xytext=OFFSET_O, textcoords="offset points",
         arrowprops=dict(arrowstyle="->", color="gray"), fontsize=11,
     )
 
@@ -285,12 +331,12 @@ with st.container(border=True):
                marker="o", linewidth=2, color=HIGHLIGHT)
     ax[1].set_title("Total Revenue per Bulan", fontsize=14)
     ax[1].set_ylabel("Revenue (R$ ribu)")
-    ax[1].set_xlabel("Bulan (2017)")
+    ax[1].set_xlabel(f"Bulan (2017), periode {period_label}")
     ax[1].set_ylim(0, monthly_df["revenue"].max() / 1000 * 1.15)
     ax[1].annotate(
         f"Puncak: R$ {peak_revenue['revenue'] / 1000:,.0f} rb",
         xy=(peak_revenue["month_label"], peak_revenue["revenue"] / 1000),
-        xytext=(-120, -5), textcoords="offset points",
+        xytext=OFFSET_R, textcoords="offset points",
         arrowprops=dict(arrowstyle="->", color="gray"), fontsize=11,
     )
 
@@ -313,22 +359,31 @@ with st.container(border=True):
         hide_index=True, use_container_width=True,
     )
 
+def arah(v):
+    return "naik" if v >= 0 else "turun"
+
+
 peak_text = (
-    f"**Insight:** Order naik dari {int(monthly_df.loc[0, 'order_count']):,} (Januari) menjadi "
-    f"{int(peak_order['order_count']):,} (**{peak_order['month_label']}**), dan revenue naik dari "
-    f"R$ {monthly_df.loc[0, 'revenue'] / 1000:,.0f} ribu menjadi R$ {peak_revenue['revenue']:,.2f}. "
+    f"**Insight:** Pada periode {period_label}, order tertinggi terjadi di **{peak_order['month_label']}** "
+    f"({int(peak_order['order_count']):,} order) dan revenue tertinggi di **{peak_revenue['month_label']}** "
+    f"(R$ {peak_revenue['revenue']:,.2f}). "
 )
-if prev_order is not None:
+if prev_order is not None and pd.notna(peak_order["order_mom_pct"]) and pd.notna(peak_order["revenue_mom_pct"]):
     peak_text += (
-        f"Dibanding {prev_order['month_label']}, order naik **{peak_order['order_mom_pct']:.1f}%** "
-        f"dan revenue naik **{peak_revenue['revenue_mom_pct']:.1f}%**. "
+        f"Dibanding {prev_order['month_label']}, order {arah(peak_order['order_mom_pct'])} "
+        f"**{abs(peak_order['order_mom_pct']):.1f}%** dan revenue {arah(peak_order['revenue_mom_pct'])} "
+        f"**{abs(peak_order['revenue_mom_pct']):.1f}%**. "
     )
-if next_order is not None:
+if next_order is not None and pd.notna(next_order["order_mom_pct"]) and pd.notna(next_order["revenue_mom_pct"]):
     peak_text += (
-        f"Pada {next_order['month_label']} order turun {abs(next_order['order_mom_pct']):.1f}% "
-        f"dan revenue turun {abs(next_order['revenue_mom_pct']):.1f}%, tetapi masih di atas "
-        f"level {prev_order['month_label'] if prev_order is not None else 'bulan sebelumnya'}."
+        f"Pada {next_order['month_label']} order {arah(next_order['order_mom_pct'])} "
+        f"{abs(next_order['order_mom_pct']):.1f}% dan revenue {arah(next_order['revenue_mom_pct'])} "
+        f"{abs(next_order['revenue_mom_pct']):.1f}%."
     )
+if len(monthly_df) == 1:
+    peak_text += "Hanya satu bulan yang tercakup, sehingga perbandingan antarbulan tidak tersedia."
+elif start_date.day != 1 or end_date != (pd.Timestamp(end_date) + pd.offsets.MonthEnd(0)).date():
+    peak_text += " Catatan: bulan pertama/terakhir bisa belum penuh karena rentang tanggal tidak mencakup seluruh bulan."
 st.success(peak_text)
 
 
@@ -339,13 +394,13 @@ st.divider()
 st.header("3. Analisis Lanjutan: Segmentasi Pelanggan (RFM)")
 st.info(
     "RFM mengelompokkan pelanggan berdasarkan Recency (hari sejak transaksi terakhir, acuan "
-    "1 Januari 2018), Frequency (jumlah order unik), dan Monetary (total nilai belanja). "
+    f"{snapshot_str}), Frequency (jumlah order unik), dan Monetary (total nilai belanja). "
     "Segmen ditentukan dari skor Recency dan Frequency; Monetary dipakai untuk "
     "membandingkan nilai belanja antar segmen."
 )
 st.caption(
-    "Keterbatasan: hanya memakai transaksi 2017, sehingga sebagian pelanggan \"At Risk\" muncul "
-    "karena pembelian mereka di 2018 tidak ikut dihitung. Mayoritas pelanggan hanya membeli "
+    "Keterbatasan: hanya memakai transaksi pada periode terpilih, sehingga sebagian pelanggan \"At Risk\" muncul "
+    "karena pembelian mereka setelah periode terpilih tidak ikut dihitung. Mayoritas pelanggan hanya membeli "
     "sekali, jadi segmen terutama dibedakan oleh Recency."
 )
 
@@ -381,16 +436,22 @@ with st.container(border=True):
         use_container_width=True,
     )
 
+second_segment = segment_counts.drop(largest_segment).idxmax()
+loyal_n = int(segment_counts["Loyal Customers"])
+loyal_text = (
+    f"Loyal Customers hanya {loyal_n} pelanggan dengan rata-rata "
+    f"{segment_avg.loc['Loyal Customers', 'frequency']:.2f} order dan R$ "
+    f"{segment_avg.loc['Loyal Customers', 'monetary']:,.2f}."
+    if loyal_n else "Belum ada Loyal Customers pada periode ini."
+)
+top3_mon = segment_avg.loc[segment_counts.nlargest(3).index, "monetary"].dropna()
 st.info(
     f"**Insight:** Segmen terbesar adalah **{largest_segment}** "
     f"({segment_counts[largest_segment]:,} pelanggan, {segment_pct[largest_segment]:.2f}%), "
-    f"hampir sama besar dengan **At Risk** ({segment_counts['At Risk']:,} pelanggan, "
-    f"{segment_pct['At Risk']:.2f}%). At Risk rata-rata terakhir belanja "
-    f"{segment_avg.loc['At Risk', 'recency']:.0f} hari lalu, sedangkan Loyal Customers hanya "
-    f"{int(segment_counts['Loyal Customers'])} pelanggan dengan rata-rata "
-    f"{segment_avg.loc['Loyal Customers', 'frequency']:.2f} order dan R$ "
-    f"{segment_avg.loc['Loyal Customers', 'monetary']:,.2f}. Rata-rata Monetary tiga segmen "
-    f"terbesar relatif mirip (± R$ 141–145)."
+    f"diikuti **{second_segment}** ({segment_counts[second_segment]:,} pelanggan, "
+    f"{segment_pct[second_segment]:.2f}%). Rata-rata recency {largest_segment} "
+    f"{segment_avg.loc[largest_segment, 'recency']:.0f} hari. {loyal_text} "
+    f"Rata-rata Monetary tiga segmen terbesar berkisar R$ {top3_mon.min():,.0f}–{top3_mon.max():,.0f}."
 )
 
 
@@ -404,29 +465,28 @@ c1, c2 = st.columns(2)
 with c1:
     with st.container(border=True):
         st.markdown("### 01 — Kategori Produk")
-        st.markdown("**Kontribusi merata, karakternya berbeda**")
+        st.markdown("**Peringkat kategori pada periode terpilih**")
         st.write(
             f"**{highest_category['category']}** tertinggi (R$ {highest_category['revenue']:,.2f}), "
             f"**{lowest_category['category']}** terendah (R$ {lowest_category['revenue']:,.2f}). "
-            f"Lima kategori teratas menyumbang sekitar **{top5_contribution:.1f}%** total revenue 2017. "
-            f"`bed_bath_table` unggul di volume order, `watches_gifts` unggul di nilai per order."
+            f"{len(top5_df)} kategori teratas menyumbang sekitar **{top5_contribution:.1f}%** total revenue periode {period_label}. "
+            f"`{best_vol['category']}` unggul di volume order, `{best_val['category']}` unggul di nilai per order."
         )
 with c2:
     with st.container(border=True):
         st.markdown("### 02 — Tren Penjualan")
         st.markdown(f"**{peak_order['month_label']} menjadi periode puncak**")
         st.write(
-            f"Order dan revenue memuncak pada **{peak_order['month_label']}**: "
-            f"**{int(peak_order['order_count']):,}** order dan "
-            f"**R$ {peak_revenue['revenue']:,.2f}**. Setelah itu keduanya turun pada Desember, "
-            f"tetapi masih di atas level Oktober."
+            f"Order memuncak pada **{peak_order['month_label']}** "
+            f"(**{int(peak_order['order_count']):,}** order), sedangkan revenue memuncak pada "
+            f"**{peak_revenue['month_label']}** (**R$ {peak_revenue['revenue']:,.2f}**)."
         )
 
 with st.container(border=True):
     st.markdown("### 03 — Segmentasi Pelanggan")
-    st.markdown("**Hampir semua pelanggan hanya membeli sekali**")
+    st.markdown("**Proporsi pembeli sekali dan pembeli berulang**")
     st.write(
-        f"**{one_time_pct:.1f}%** pelanggan hanya bertransaksi sekali selama 2017. "
+        f"**{one_time_pct:.1f}%** pelanggan hanya bertransaksi sekali selama periode terpilih. "
         f"Segmen Recent Customers {segment_counts['Recent Customers']:,} "
         f"({segment_pct['Recent Customers']:.2f}%), At Risk {segment_counts['At Risk']:,} "
         f"({segment_pct['At Risk']:.2f}%), Regular {segment_counts['Regular Customers']:,} "
@@ -441,24 +501,20 @@ with st.container(border=True):
 st.divider()
 st.header("💡 Rekomendasi Action Item")
 
-oct_orders = int(prev_order["order_count"]) if prev_order is not None else 0
-with st.container(border=True):
-    st.markdown("### 01 — Bedakan Strategi per Kategori Unggulan")
-    st.write(
-        "Untuk kategori berbasis volume seperti `bed_bath_table`, prioritaskan ketersediaan stok "
-        "dan promosi bundling. Untuk kategori bernilai per order tinggi seperti `watches_gifts`, "
-        "fokuskan pada promosi bernilai tinggi dan jaminan pengiriman."
-    )
-
 with st.container(border=True):
     st.markdown(f"### 02 — Siapkan Kapasitas Sebelum {peak_order['month_label']}")
+    cap_text = f"Order {peak_order['month_label']} mencapai {int(peak_order['order_count']):,}. "
+    if prev_order is not None and pd.notna(peak_order["order_mom_pct"]):
+        cap_text = (
+            f"Order {peak_order['month_label']} {arah(peak_order['order_mom_pct'])} sekitar "
+            f"{abs(peak_order['order_mom_pct']):.0f}% dari {prev_order['month_label']} "
+            f"({int(prev_order['order_count']):,} menjadi {int(peak_order['order_count']):,} order). "
+        )
     st.write(
-        f"Order {peak_order['month_label']} naik sekitar {peak_order['order_mom_pct']:.0f}% dari "
-        f"{prev_order['month_label'] if prev_order is not None else 'bulan sebelumnya'} "
-        f"({oct_orders:,} menjadi {int(peak_order['order_count']):,} order). Rencanakan stok, gudang, "
-        f"dan kurir untuk kapasitas minimal setara {int(round(peak_order['order_count'], -2)):,} order "
-        f"per bulan pada periode tersebut. Penyebab lonjakan perlu diverifikasi, misalnya apakah "
-        f"berkaitan dengan promosi akhir tahun."
+        cap_text
+        + f"Rencanakan stok, gudang, dan kurir untuk kapasitas minimal setara "
+        f"{int(round(peak_order['order_count'], -2)):,} order per bulan pada periode tersebut. "
+        f"Penyebab lonjakan perlu diverifikasi, misalnya apakah berkaitan dengan promosi."
     )
 
 with st.container(border=True):
@@ -473,7 +529,7 @@ with st.container(border=True):
 with st.container(border=True):
     st.markdown("### 04 — Lengkapi Data Kategori Produk")
     st.write(
-        f"Produk tanpa kategori menyumbang sekitar {uncategorized_pct:.1f}% revenue 2017 yang tidak "
+        f"Produk tanpa kategori menyumbang sekitar {uncategorized_pct:.1f}% revenue pada periode terpilih yang tidak "
         f"dapat dianalisis per kategori. Melengkapi kategori akan membuat analisis stok dan "
         f"promosi lebih akurat."
     )
