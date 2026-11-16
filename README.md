@@ -110,4 +110,6 @@ python -m streamlit run dashboard/dashboard.py
 
 3. Dashboard terbuka otomatis di browser. Jika tidak, buka alamat lokal yang tampil di terminal.
 
+Dashboard memiliki filter rentang tanggal di sidebar yang memperbarui ringkasan, grafik, dan insight.
+
 `main_data.csv` dihasilkan oleh `notebook.ipynb`.
